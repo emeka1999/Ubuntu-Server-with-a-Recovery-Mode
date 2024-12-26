@@ -1,0 +1,157 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: test
+    username: test
+    password: test
+  ssh:
+    install-server: true
+    allow-pw: true
+  storage:
+    config:
+      - {id: disk-nvme0, type: disk, ptable: gpt, path: /dev/nvme0n1, wipe: superblock-recursive, preserve: false, name: '', grub_device: true}
+      - {id: partition-esp, type: partition, device: disk-nvme0, size: 512M, wipe: superblock, flag: boot, number: 1, preserve: false, grub_device: true}
+      - {id: format-esp, type: format, volume: partition-esp, fstype: fat32, preserve: false}
+      - {id: mount-esp, type: mount, device: format-esp, path: /boot/efi}
+      - {id: partition-bios, type: partition, device: disk-nvme0, size: 1M, flag: bios_grub, number: 2, preserve: false}
+      - {id: partition-boot, type: partition, device: disk-nvme0, size: 1G, wipe: superblock, flag: '', number: 3, preserve: false}
+      - {id: format-boot, type: format, volume: partition-boot, fstype: ext4, preserve: false}
+      - {id: mount-boot, type: mount, device: format-boot, path: /boot}
+      - {id: partition-recovery, type: partition, device: disk-nvme0, size: 8G, wipe: superblock, flag: '', number: 4, preserve: false}
+      - {id: format-recovery, type: format, volume: partition-recovery, fstype: ext4, preserve: false}
+      - {id: mount-recovery, type: mount, device: format-recovery, path: /recovery}
+      - {id: partition-root, type: partition, device: disk-nvme0, size: 58789462016B, wipe: superblock, flag: '', number: 5, preserve: false}
+      - {id: format-root, type: format, volume: partition-root, fstype: ext4, preserve: false}
+      - {id: mount-root, type: mount, device: format-root, path: /}
+  packages:
+    - grub-pc
+    - grub-efi-amd64
+    - shim-signed
+  early-commands:
+    - mkdir -p /target/recovery
+  late-commands:
+    - |
+      #!/bin/bash
+      set -e
+      
+      # Create recovery directory
+      mkdir -p /target/recovery
+      
+      # Copy entire ISO contents maintaining structure
+      cp -r /cdrom/* /target/recovery/
+      cp -r /cdrom/.disk /target/recovery/
+      
+      # Create preseed2 directory
+      mkdir -p /target/recovery/preseed2
+      
+      # Create empty meta-data file
+      touch /target/recovery/preseed2/meta-data
+      
+      # Create simplified user-data file for preseed2 with direct partitioning
+      cat << 'EOF' > /target/recovery/preseed2/user-data
+      #cloud-config
+      autoinstall:
+        version: 1
+        locale: en_US.UTF-8
+        keyboard:
+          layout: us
+        identity:
+          hostname: test
+          username: test
+          password: test
+        ssh:
+          install-server: true
+          allow-pw: yes
+        bootloader:
+          skip_install: true
+        storage:
+          config:
+            - id: rootdisk
+              type: disk
+              path: /dev/nvme0n1
+              preserve: true
+              grub_device: true
+            - id: esp-partition
+              type: partition
+              device: rootdisk
+              size: 512M
+              number: 1
+              preserve: true
+              grub_device: true
+              flag: boot
+            - id: esp-format
+              type: format
+              volume: esp-partition
+              fstype: fat32
+              preserve: true
+            - id: esp-mount
+              type: mount
+              device: esp-format
+              path: /boot/efi
+            - id: bios-partition
+              type: partition
+              device: rootdisk
+              size: 1M
+              number: 2
+              preserve: true
+              flag: bios_grub
+            - id: boot-partition
+              type: partition
+              device: rootdisk
+              size: 1G
+              number: 3
+              preserve: true
+            - id: boot-format
+              type: format
+              volume: boot-partition
+              fstype: ext4
+              preserve: true
+            - id: boot-mount
+              type: mount
+              device: boot-format
+              path: /boot
+            - id: root-partition
+              type: partition
+              device: rootdisk
+              size: 58789462016B
+              number: 5
+              preserve: true
+            - id: root-format
+              type: format
+              volume: root-partition
+              fstype: ext4
+            - id: root-mount
+              type: mount
+              device: root-format
+              path: /
+        late-commands:
+          - |
+            cat << 'GRUB_ENTRY' >> /target/etc/grub.d/40_custom
+            menuentry "Ubuntu Recovery" {
+                set gfxpayload=keep
+                root=(hd0,gpt4)
+                linux /casper/vmlinuz autoinstall debug=1 ds=nocloud\;s=/cdrom/preseed2/ fsck.mode=skip --- verbose
+                initrd /casper/initrd.gz
+            }
+            GRUB_ENTRY
+          - curtin in-target --target=/target -- update-grub
+          - curtin in-target --target=/target -- e2label /dev/nvme0n1p4 RECOVERY
+      EOF
+      
+    - echo 'GRUB_TIMEOUT=20' >> /target/etc/default/grub
+    - echo 'GRUB_RECORDFAIL_TIMEOUT=20' >> /target/etc/default/grub
+    - |
+      cat << 'EOF' >> /target/etc/grub.d/40_custom
+      menuentry "Ubuntu Recovery" {
+          set gfxpayload=keep
+          root=(hd0,gpt4)
+          linux /casper/vmlinuz autoinstall debug=1 ds=nocloud\;s=/cdrom/preseed2/ fsck.mode=skip --- verbose
+          initrd /casper/initrd.gz
+      }
+      EOF
+    - curtin in-target --target=/target -- update-grub
+    - curtin in-target --target=/target -- e2label /dev/nvme0n1p4 RECOVERY
